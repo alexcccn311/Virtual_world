@@ -4,6 +4,7 @@ from .sqlite_store import CityWriteSession, SQLiteWorldStore
 from .global_id_registry import (
     GLOBAL_ID_REGISTRY_FILENAME,
     GlobalCharacterIdRegistry,
+    format_character_id,
 )
 
 __all__ = [
@@ -11,4 +12,5 @@ __all__ = [
     "SQLiteWorldStore",
     "GLOBAL_ID_REGISTRY_FILENAME",
     "GlobalCharacterIdRegistry",
+    "format_character_id",
 ]

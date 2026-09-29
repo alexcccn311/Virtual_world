@@ -4,15 +4,73 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from world_generation.storage.global_id_registry import (
     GLOBAL_ID_REGISTRY_FILENAME,
     GlobalCharacterIdRegistry,
 )
-from world_generation.storage.sqlite_store import SQLiteWorldStore
+from world_generation.storage.sqlite_store import CityWriteSession, SQLiteWorldStore
 
 
 class GlobalIdRegistryTests(unittest.TestCase):
+    def test_city_remains_generating_until_postprocessing_is_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteWorldStore(Path(folder) / "world.sqlite3")
+            session = store.begin_city_generation(
+                city_template="测试世界",
+                seed=1,
+                target_population=1,
+            )
+            population_usage = {
+                "capacity": 1,
+                "used": 0,
+                "remaining": 1,
+                "districts": {},
+                "streets": {},
+            }
+            session.prepare_completion(population_usage)
+
+            connection = sqlite3.connect(store.database_path)
+            try:
+                status = connection.execute(
+                    "SELECT status FROM cities WHERE city_id = ?",
+                    (session.city_id,),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(status, "generating")
+
+            session.mark_complete()
+            connection = sqlite3.connect(store.database_path)
+            try:
+                status = connection.execute(
+                    "SELECT status FROM cities WHERE city_id = ?",
+                    (session.city_id,),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(status, "complete")
+
+    def test_begin_city_generation_closes_connection_when_setup_fails(self) -> None:
+        store = object.__new__(SQLiteWorldStore)
+        connection = Mock()
+        with (
+            patch.object(store, "_connect", return_value=connection),
+            patch.object(
+                CityWriteSession,
+                "_reserve_block_on_connection",
+                side_effect=RuntimeError("reservation failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "reservation failed"),
+        ):
+            store.begin_city_generation(
+                city_template="测试世界",
+                seed=1,
+                target_population=1,
+            )
+        connection.close.assert_called_once_with()
+
     def test_sibling_world_databases_receive_disjoint_character_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

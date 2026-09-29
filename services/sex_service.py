@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from .. import config
 from ..common.distributions import weighted_choice
 from ..generators import character_generator
-from ..models.entities import Character, CityPopulation, Organization
+from ..models.entities import Character, Organization
 
 
 BREAST_PREFERENCE_ADJUSTMENTS = {
@@ -1326,86 +1326,6 @@ def sex_service_visit_arrival_time(
     return datetime.combine(visit_date, time.min, timezone) + timedelta(
         minutes=minute_of_day
     )
-
-
-def daily_sex_service_visit_probability(
-    character: Character | Mapping[str, object],
-    *,
-    privilege_scope: str | None = None,
-    seed: int = 12345,
-) -> float:
-    """Compatibility conversion; runtime scheduling uses monthly plans."""
-
-    monthly_frequency = monthly_sex_service_visit_frequency(
-        character,
-        privilege_scope=privilege_scope,
-        seed=seed,
-    )
-    return 1.0 - math.exp(-monthly_frequency / (365.2425 / 12.0))
-
-
-def simulate_sex_service_demand(city: CityPopulation, days: int = 365, seed: int = 12345) -> dict:
-    """Simulate independent daily visits and report demand per sex worker."""
-    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
-        raise ValueError("days 必须是大于 0 的整数")
-    workers = [
-        character for character in city.characters
-        if character.occupation in character_generator.SEX_SERVICE_PROFESSIONS
-    ]
-    if not workers:
-        raise ValueError("城市中没有性工作者，无法计算人均接客量")
-    customers = [character for character in city.characters if character.sex == "male" and character.age >= 18]
-    crime_depths = sex_service_crime_organization_depths(city.organizations)
-    organizations_by_id = {organization.id: organization for organization in city.organizations}
-    probabilities = [
-        daily_sex_service_visit_probability(
-            character,
-            privilege_scope=(
-                sex_service_crime_privilege_scope(
-                    organizations_by_id[character.organization_id].type,
-                    crime_depths[character.organization_id],
-                    character.organization_role,
-                )
-                if character.organization_id in crime_depths
-                and character.organization_role is not None
-                else None
-            ),
-            seed=seed,
-        )
-        for character in customers
-    ]
-    time_weights = [sex_service_visit_time_weights(character) for character in customers]
-    expected_by_period = {
-        period: sum(probability * weights[period] for probability, weights in zip(probabilities, time_weights))
-        for period in config.SEX_SERVICE_VISIT_TIME_PERIODS
-    }
-    rng = random.Random(seed)
-    time_rng = random.Random(seed ^ 0x5E71C3)
-    simulated_by_period = {period: 0 for period in config.SEX_SERVICE_VISIT_TIME_PERIODS}
-    total_visits = 0
-    for _ in range(days):
-        for probability, weights in zip(probabilities, time_weights):
-            if rng.random() < probability:
-                total_visits += 1
-                simulated_by_period[weighted_choice(time_rng, weights)] += 1
-    expected_daily_visits = sum(probabilities)
-    return {
-        "days": days,
-        "adult_men": len(probabilities),
-        "sex_workers": len(workers),
-        "total_visits": total_visits,
-        "simulated_daily_visits": total_visits / days,
-        "expected_daily_visits": expected_daily_visits,
-        "simulated_clients_per_worker_per_day": total_visits / days / len(workers),
-        "expected_clients_per_worker_per_day": expected_daily_visits / len(workers),
-        "mean_daily_probability": expected_daily_visits / len(probabilities) if probabilities else 0.0,
-        "max_daily_probability": max(probabilities, default=0.0),
-        "expected_daily_visits_by_period": expected_by_period,
-        "simulated_visits_by_period": simulated_by_period,
-        "simulated_daily_visits_by_period": {
-            period: count / days for period, count in simulated_by_period.items()
-        },
-    }
 
 
 def sex_worker_appeal_score(attractiveness: float, body: float) -> float:

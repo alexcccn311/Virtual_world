@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from .. import config
 from ..generators.character_generator import SEX_SERVICE_PROFESSIONS
 from .loan_service import ensure_loan_schema, settle_due_player_loans
+from .cash_service import spend_cash
 from .sex_service import (
     SexServiceVenueIndex,
     SexServicePrivilege,
@@ -130,11 +131,16 @@ def _pay_monthly_salaries(connection: sqlite3.Connection, payment_count: int) ->
             data_json,
             '$.cash',
             CAST(COALESCE(json_extract(data_json, '$.cash'), 0) AS INTEGER)
-            + CAST(COALESCE(json_extract(data_json, '$.income'), 0) AS INTEGER) * ?
+                + CAST(COALESCE(json_extract(data_json, '$.income'), 0) AS INTEGER) * ?,
+            '$.net_assets',
+            CAST(COALESCE(json_extract(data_json, '$.cash'), 0) AS INTEGER)
+                + CAST(COALESCE(json_extract(data_json, '$.income'), 0) AS INTEGER) * ?
+                + CAST(COALESCE(json_extract(data_json, '$.other_assets'), 0) AS INTEGER)
+                - CAST(COALESCE(json_extract(data_json, '$.debt'), 0) AS INTEGER)
         )
         WHERE occupation NOT IN ({placeholders})
         """,
-        (payment_count, *excluded),
+        (payment_count, payment_count, *excluded),
     )
 
 
@@ -169,6 +175,11 @@ def _settle_sex_worker_earnings(
                 '$.cash',
                 CAST(COALESCE(json_extract(data_json, '$.cash'), 0) AS INTEGER)
                     + ?,
+                '$.net_assets',
+                CAST(COALESCE(json_extract(data_json, '$.cash'), 0) AS INTEGER)
+                    + ?
+                    + CAST(COALESCE(json_extract(data_json, '$.other_assets'), 0) AS INTEGER)
+                    - CAST(COALESCE(json_extract(data_json, '$.debt'), 0) AS INTEGER),
                 '$.sex_service_earnings_total',
                 CAST(COALESCE(
                     json_extract(data_json, '$.sex_service_earnings_total'),
@@ -178,6 +189,7 @@ def _settle_sex_worker_earnings(
             WHERE character_id = ?
             """,
             (
+                int(total_earnings or 0),
                 int(total_earnings or 0),
                 int(total_earnings or 0),
                 str(worker_character_id),
@@ -920,22 +932,28 @@ def _process_due_visits(
         (invocation_iso,),
     ).fetchall()
     for character_id, total_charge in charges:
-        connection.execute(
-            """
-            UPDATE characters
-            SET data_json = json_set(
-                data_json,
-                '$.cash',
-                MAX(
-                    0,
-                    CAST(COALESCE(json_extract(data_json, '$.cash'), 0) AS INTEGER)
-                    - ?
+        charge = int(total_charge or 0)
+        if spend_cash(connection, str(character_id), charge) == "success":
+            continue
+        # Keep the usual one-payment-per-person path; only a depleted balance
+        # needs chronological per-visit checks. Failed visits never create debt.
+        visits = connection.execute(
+            """SELECT visit_id, customer_charge FROM sex_service_visit_schedule
+               WHERE character_id=? AND status='planned' AND scheduled_at<=?
+                 AND organization_id IS NOT NULL AND customer_charge IS NOT NULL
+               ORDER BY scheduled_at, visit_id""",
+            (character_id, invocation_iso),
+        ).fetchall()
+        for visit_id, visit_charge in visits:
+            if spend_cash(connection, str(character_id), int(visit_charge)) == "fail":
+                connection.execute(
+                    """UPDATE sex_service_visit_schedule
+                       SET organization_id=NULL, worker_character_id=NULL,
+                           service_name=NULL, customer_charge=NULL, worker_earnings=NULL,
+                           service_started_at=NULL, service_ended_at=NULL
+                       WHERE visit_id=?""",
+                    (visit_id,),
                 )
-            )
-            WHERE character_id = ?
-            """,
-            (int(total_charge or 0), str(character_id)),
-        )
 
     connection.execute(
         """
@@ -994,6 +1012,11 @@ def update_time(
                 timezone,
             )
             for boundary in payment_boundaries:
+                # Resolve affordability before paying commissions for these visits.
+                _process_due_visits(
+                    connection,
+                    (boundary - timedelta(microseconds=1)).astimezone(ZoneInfo("UTC")).isoformat(timespec="microseconds"),
+                )
                 # A loan already due before this salary boundary must be judged
                 # against the cash available on its due date, not money earned
                 # later while the player was offline.

@@ -35,7 +35,7 @@ from world_generation.services.sex_service import (
     sex_service_worker_earnings,
     simplified_sex_service_charge,
 )
-from world_generation.services.time_update import update_time
+from world_generation.services.time_update import _process_due_visits, update_time
 
 
 def _customer(**overrides: object) -> dict[str, object]:
@@ -53,6 +53,12 @@ def _customer(**overrides: object) -> dict[str, object]:
         "address": [0, 0],
     }
     result.update(overrides)
+    if "net_assets" not in overrides:
+        result["net_assets"] = (
+            int(result["cash"])
+            + int(result["other_assets"])
+            - int(result["debt"])
+        )
     return result
 
 
@@ -387,6 +393,74 @@ class VenueSelectionTests(unittest.TestCase):
 
 
 class VenueTimeUpdateIntegrationTests(unittest.TestCase):
+    def test_visit_charge_shortfall_skips_purchase_without_debt(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE characters(
+                    character_id TEXT PRIMARY KEY,
+                    data_json TEXT NOT NULL
+                );
+                CREATE TABLE sex_service_visit_schedule(
+                    visit_id INTEGER PRIMARY KEY,
+                    worker_character_id TEXT, service_name TEXT, worker_earnings INTEGER,
+                    service_started_at TEXT, service_ended_at TEXT,
+                    character_id TEXT NOT NULL,
+                    customer_charge INTEGER,
+                    status TEXT NOT NULL,
+                    scheduled_at TEXT NOT NULL,
+                    organization_id TEXT,
+                    processed_at TEXT
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO characters VALUES ('CUS-1', ?)",
+                (json.dumps({
+                    "cash": 100,
+                    "debt": 50,
+                    "other_assets": 400,
+                    "net_assets": 450,
+                }),),
+            )
+            connection.executemany(
+                """
+                INSERT INTO sex_service_visit_schedule
+                (character_id,customer_charge,status,scheduled_at,organization_id,processed_at)
+                VALUES ('CUS-1', ?, 'planned', ?, 'VENUE-1', NULL)
+                """,
+                ((80, "2026-01-01T08:00:00+08:00"),
+                 (70, "2026-01-01T09:00:00+08:00")),
+            )
+
+            _process_due_visits(connection, "2026-01-01T10:00:00+08:00")
+
+            cash, debt, net_assets = connection.execute(
+                """
+                SELECT json_extract(data_json, '$.cash'),
+                       json_extract(data_json, '$.debt'),
+                       json_extract(data_json, '$.net_assets')
+                FROM characters WHERE character_id = 'CUS-1'
+                """
+            ).fetchone()
+            self.assertEqual((cash, debt, net_assets), (20, 50, 370))
+            self.assertEqual(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM sex_service_visit_schedule
+                    WHERE status = 'elapsed' AND processed_at IS NOT NULL
+                    """
+                ).fetchone()[0],
+                2,
+            )
+            failed = connection.execute("SELECT organization_id,customer_charge,worker_earnings FROM sex_service_visit_schedule ORDER BY visit_id DESC LIMIT 1").fetchone()
+            self.assertEqual(failed, (None, None, None))
+            _process_due_visits(connection, "2026-01-01T10:00:00+08:00")
+            self.assertEqual(connection.execute("SELECT json_extract(data_json,'$.cash') FROM characters").fetchone()[0], 20)
+        finally:
+            connection.close()
+
     def test_planned_visits_choose_a_venue_and_elapsed_visits_charge_cash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "world.sqlite3"
@@ -446,6 +520,9 @@ class VenueTimeUpdateIntegrationTests(unittest.TestCase):
                 "sex": "female",
                 "age": 24,
                 "cash": 0,
+                "debt": 0,
+                "other_assets": 0,
+                "net_assets": 0,
                 "income": 10_000,
                 "address": [2, 0],
                 "skills": {"打飞机": "熟练", "阴道交": "专业"},
@@ -487,14 +564,19 @@ class VenueTimeUpdateIntegrationTests(unittest.TestCase):
                       AND organization_id = 'VENUE-1'
                     """
                 ).fetchone()
-                cash = connection.execute(
+                cash, net_assets = connection.execute(
                     """
-                    SELECT json_extract(data_json, '$.cash')
+                    SELECT json_extract(data_json, '$.cash'),
+                           json_extract(data_json, '$.net_assets')
                     FROM characters WHERE character_id = 'CUS-1'
                     """
-                ).fetchone()[0]
+                ).fetchone()
                 self.assertGreater(elapsed, 0)
                 self.assertEqual(cash, 20_200 - total_charge)
+                self.assertEqual(
+                    net_assets,
+                    cash + customer["other_assets"] - customer["debt"],
+                )
                 self.assertEqual(
                     connection.execute(
                         """
@@ -586,6 +668,9 @@ class VenueTimeUpdateIntegrationTests(unittest.TestCase):
                 "sex": "female",
                 "age": 24,
                 "cash": 0,
+                "debt": 0,
+                "other_assets": 0,
+                "net_assets": 0,
                 "income": 10_000,
                 "address": [1, 0],
                 "appearance_score": 80.0,
@@ -706,15 +791,17 @@ class VenueTimeUpdateIntegrationTests(unittest.TestCase):
                       AND worker_paid_at IS NOT NULL
                     """
                 ).fetchone()[0]
-                worker_cash, lifetime_earnings = connection.execute(
+                worker_cash, worker_net_assets, lifetime_earnings = connection.execute(
                     """
                     SELECT json_extract(data_json, '$.cash'),
+                           json_extract(data_json, '$.net_assets'),
                            json_extract(data_json, '$.sex_service_earnings_total')
                     FROM characters WHERE character_id = 'WORKER-PLAYER'
                     """
                 ).fetchone()
                 self.assertGreater(paid_total, 0)
                 self.assertEqual(worker_cash, paid_total)
+                self.assertEqual(worker_net_assets, paid_total)
                 self.assertEqual(lifetime_earnings, paid_total)
             finally:
                 connection.close()
@@ -978,6 +1065,9 @@ class TimeUpdateTests(unittest.TestCase):
                 "age": 30,
                 "cash": cash,
                 "income": income,
+                "debt": 0,
+                "other_assets": 0,
+                "net_assets": cash,
                 "sexual_preferences": {"desire": desire} if desire else None,
                 "hobbies": hobbies or [],
                 "organization_role": organization_role,
@@ -1030,6 +1120,16 @@ class TimeUpdateTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def _net_assets(self, character_id: str) -> int:
+        connection = sqlite3.connect(self.database)
+        try:
+            return int(connection.execute(
+                "SELECT json_extract(data_json, '$.net_assets') FROM characters WHERE character_id = ?",
+                (character_id,),
+            ).fetchone()[0])
+        finally:
+            connection.close()
+
     def test_initializes_then_pays_each_crossed_first_and_keeps_three_day_horizon(self) -> None:
         timezone = ZoneInfo("Asia/Shanghai")
         first = datetime(2026, 1, 15, 12, 0, tzinfo=timezone)
@@ -1055,6 +1155,10 @@ class TimeUpdateTests(unittest.TestCase):
         self.assertEqual(self._cash("CUS-CRIME"), 20_400)
         self.assertEqual(self._cash("CUS-WOMAN"), 630)
         self.assertEqual(self._cash("CUS-WORKER"), 40)
+        self.assertEqual(self._net_assets("CUS-NORMAL"), 20_200)
+        self.assertEqual(self._net_assets("CUS-CRIME"), 20_400)
+        self.assertEqual(self._net_assets("CUS-WOMAN"), 630)
+        self.assertEqual(self._net_assets("CUS-WORKER"), 40)
 
         connection = sqlite3.connect(self.database)
         try:

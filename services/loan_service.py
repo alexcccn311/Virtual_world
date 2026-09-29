@@ -6,13 +6,14 @@ import json
 import random
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from .. import config
+from .cash_service import spend_cash
 from ..models.entities import LoanQuote, PlayerLoanContract
 
 
@@ -468,11 +469,8 @@ def quote_player_loan(
     try:
         ensure_loan_schema(connection)
         policy = _load_lender_policy(connection, lender_organization_id)
-        _load_character_finances(connection, borrower_character_id)
-        current_principal = _current_lender_principal(
-            connection, borrower_character_id, lender_organization_id
-        )
-        quote = quote_loan(policy, current_principal, amount)
+        _, _, total_debt, _ = _load_character_finances(connection, borrower_character_id)
+        quote = quote_loan(policy, total_debt, amount)
         return {
             **quote.as_dict(),
             "lender_organization_name": policy.name,
@@ -480,6 +478,44 @@ def quote_player_loan(
         }
     finally:
         connection.close()
+
+
+
+def get_player_lending_capacity(database_path, borrower_character_id, lender_organization_id):
+    """All-lender total debt determines remaining principal headroom."""
+    connection = sqlite3.connect(Path(database_path), timeout=30.0)
+    try:
+        ensure_loan_schema(connection)
+        policy = _load_lender_policy(connection, lender_organization_id)
+        if not policy.offers_loans:
+            raise ValueError("该机构不提供贷款")
+        _, _, current, _ = _load_character_finances(connection, borrower_character_id)
+        return dict(lender_organization_name=policy.name, max_total_debt=policy.max_total_debt,
+                    current_debt=current,
+                    available_principal=None if policy.max_total_debt is None else max(0, policy.max_total_debt-current),
+                    term_months=1, fee_withheld=True)
+    finally:
+        connection.close()
+
+
+def negotiate_loan_quote(baseline: LoanQuote, amount: int, monthly_rate_bps: int, fee_bps: int) -> LoanQuote:
+    """The model can reduce principal or raise prices, never weaken the floor."""
+    for value in (amount, monthly_rate_bps, fee_bps):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 2**63-1:
+            raise ValueError("贷款参数必须是有效整数")
+    if not 0 < amount <= baseline.principal:
+        raise ValueError("成交本金必须大于零且不能超过已评估本金")
+    if monthly_rate_bps < baseline.monthly_rate_bps or fee_bps < baseline.fee_bps:
+        raise ValueError("成交利率和手续费不得低于标准")
+    if fee_bps >= 10000:
+        raise ValueError("手续费必须低于本金")
+    interest = round(amount * monthly_rate_bps / 10000)
+    fee = round(amount * fee_bps / 10000)
+    if fee >= amount or amount + interest > 2**63-1:
+        raise ValueError("实际到账必须为正且金额不能溢出")
+    return replace(baseline, principal=amount, monthly_rate_bps=monthly_rate_bps,
+                   fee_bps=fee_bps, interest=interest, fee=fee,
+                   cash_disbursed=amount-fee, total_due=amount+interest)
 
 
 def execute_player_loan(
@@ -491,6 +527,8 @@ def execute_player_loan(
     borrowed_at: datetime | None = None,
     timezone_name: str = DEFAULT_TIMEZONE,
     request_id: str | None = None,
+    expected_quote: dict | None = None,
+    authorized_npc_id: str | None = None,
 ) -> PlayerLoanContract:
     """Atomically disburse one player loan after an NPC approves it."""
     request_id = request_id or uuid.uuid4().hex
@@ -512,6 +550,9 @@ def execute_player_loan(
                 existing.borrower_character_id != borrower_character_id
                 or existing.lender_organization_id != lender_organization_id
                 or existing.principal != amount
+                or (expected_quote is not None and (
+                    existing.monthly_rate_bps != expected_quote.get("monthly_rate_bps")
+                    or existing.fee_bps != expected_quote.get("fee_bps")))
             ):
                 raise ValueError("request_id 已被另一笔不同的贷款请求使用")
             connection.commit()
@@ -521,10 +562,31 @@ def execute_player_loan(
         payload, cash, aggregate_debt, other_assets = _load_character_finances(
             connection, borrower_character_id
         )
-        current_principal = _current_lender_principal(
-            connection, borrower_character_id, lender_organization_id
-        )
-        quote = quote_loan(policy, current_principal, amount)
+        baseline_data = expected_quote.get("baseline_quote") if expected_quote else None
+        assessed_amount = baseline_data.get("principal") if baseline_data else amount
+        quote = quote_loan(policy, aggregate_debt, assessed_amount)
+        if expected_quote is not None:
+            actual = {**quote.as_dict(), "max_total_debt": policy.max_total_debt}
+            comparison = baseline_data if baseline_data else expected_quote
+            if any(comparison.get(key) != value for key, value in actual.items()):
+                raise ValueError("报价条件已变化，请重新报价并确认")
+            if baseline_data:
+                quote = negotiate_loan_quote(quote, amount, expected_quote.get("monthly_rate_bps"), expected_quote.get("fee_bps"))
+                if any(expected_quote.get(key) != value for key, value in quote.as_dict().items()):
+                    raise ValueError("成交参数不合格，请重新报价并确认")
+        if authorized_npc_id is not None:
+            # Recheck authorization under the same write lock as the money change.
+            from .lender_staff_service import get_lender_duty_roster
+            roster = get_lender_duty_roster(database_path, lender_organization_id, now=local_time)
+            employee = connection.execute(
+                "SELECT organization_id FROM characters WHERE character_id=?", (authorized_npc_id,)
+            ).fetchone()
+            permitted = any(p["character_id"] == authorized_npc_id and p["can_handle_loans"]
+                            for p in roster["on_duty"])
+            if not employee or employee[0] != lender_organization_id or not permitted:
+                raise ValueError("该 NPC 当前无权在此机构放款")
+            if payload.get("active_trip") or (payload.get("current_location") or {}).get("organization_id") != lender_organization_id:
+                raise ValueError("玩家已离开机构，不能放款")
         new_cash = cash + quote.cash_disbursed
         new_debt = aggregate_debt + quote.total_due
         payload.update(
@@ -573,6 +635,8 @@ def settle_due_player_loans(
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ValueError("current_time 必须是带时区的 datetime")
     current_iso = current_time.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+    if not connection.in_transaction:
+        connection.execute("BEGIN IMMEDIATE")
     rows = connection.execute(
         """
         SELECT loan_id, borrower_character_id, total_due
@@ -587,7 +651,7 @@ def settle_due_player_loans(
     for loan_id, character_id, total_due in rows:
         payload, cash, debt, other_assets = _load_character_finances(connection, str(character_id))
         total_due = int(total_due)
-        if cash < total_due:
+        if spend_cash(connection, str(character_id), total_due) == "fail":
             connection.execute(
                 "UPDATE player_loan_contracts SET status = 'overdue' WHERE loan_id = ?",
                 (str(loan_id),),

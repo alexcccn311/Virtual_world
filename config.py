@@ -4,7 +4,7 @@
 # City composition rules
 # =========================
 
-CONFIG_VERSION = "5.15"
+CONFIG_VERSION = "5.17"
 
 INDEPENDENT_POPULATION_SHARE = 0.24
 MINIMUM_CITY_POPULATION = 500_000
@@ -12,6 +12,18 @@ MINIMUM_CITY_POPULATION = 500_000
 # venues are rarer rather than internally padded with implausible support jobs.
 SEX_WORKER_POPULATION_RATIO = 2_200 / 500_000
 MINIMUM_LENDER_ORGANIZATIONS_PER_TYPE = 3
+
+# =========================
+# Public transport rules
+# =========================
+
+# Stops form a deterministic maximal spacing net over road junctions. Buses
+# are route-free: any stop can reach any other stop directly.
+BUS_STOP_MIN_SPACING_M = 450.0
+BUS_OPERATION_START_MINUTE = 6 * 60
+BUS_OPERATION_END_MINUTE = 23 * 60
+BUS_FREQUENCY_MINUTES = 10
+BUS_SPEED_KMH = 15.0
 
 DISTRICTS = {
     "旧港区": {
@@ -559,6 +571,20 @@ SEX_SERVICE_VISIT_OCCUPATION_TIME_PROFILE = {
 
 CITY_TEMPLATES = {
     "罪恶都市": {
+        "world_background": """这是一座被彻底夺权的罪恶都市。{crime_group_name}早已把政府和警察从城里赶出去令他们再也不敢回来,
+{crime_group_name}通过暴力和恐惧彻底统治了整座城市,没有任何组织或个人敢挑战与反抗他们；原有公权力、正常司法和中立保护已经不再运转。
+这里的秩序不是偶尔失灵，而是由暴力、利益、身份和靠山共同维持。居民每天都可能遭遇抢夺、勒索、殴打、绑架、
+谋杀或失踪，旁观者首先考虑的是自己会不会成为下一个目标、是否会牵连家人，以及怎样从现场活着离开。
+城市的危险不是少数街区的特殊现象，而是所有阶层都必须适应的生活底色。
+
+在这座城市里，能够长期活下来的居民都学会了对别人施加伤害、利用别人、欺骗别人，或至少在看见危险时先保全自己。
+善良、诚实和单纯再这座城市中完全没有生存的土壤；人们眼里只有赤裸裸的欲望与利益，为了满足自己的欲望他们可以做任何事没有任何下限可言,
+不能把城市任何居民写成有稳定道德底线的普通人,所有人都时刻为了追逐欲望和利益而不择手段唯一的区别只在于有没有机会而已。
+即使是看似温和的人，也可能冷漠、撒谎、背叛、敲诈或袖手旁观。这不代表每个人都是职业杀手，也不代表所有人反应相同；恶意、恐惧、贪婪、麻木和偶尔的偏袒应由处境与性格决定。
+
+财富、身份和靠山决定一个人能把危险推给谁，也决定他在暴力面前能保留多少体面。上层可以把伤害包装成业务和规矩，
+底层只能在恐惧与高强度的压迫中艰难求生苦苦寻觅伤害他人来令自己上位的机会；两者都不能把这座城市变回正常社会。
+""",
         "required_districts": {
             "商业区_1": 1,
             "奢靡区_1": 1,

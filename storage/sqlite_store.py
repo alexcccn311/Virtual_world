@@ -115,6 +115,94 @@ CREATE INDEX IF NOT EXISTS idx_organizations_city
 CREATE INDEX IF NOT EXISTS idx_organizations_parent
     ON organizations(parent_organization_id);
 
+CREATE TABLE IF NOT EXISTS roads (
+    city_id TEXT NOT NULL,
+    road_id TEXT NOT NULL,
+    district_name TEXT NOT NULL,
+    street_name TEXT NOT NULL,
+    level TEXT NOT NULL CHECK (
+        level IN ('district_boundary', 'street_boundary', 'local')
+    ),
+    width_m REAL NOT NULL CHECK (width_m > 0),
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (city_id, road_id),
+    FOREIGN KEY (city_id) REFERENCES cities(city_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_roads_street
+    ON roads(city_id, street_name, level);
+
+CREATE TABLE IF NOT EXISTS bus_systems (
+    city_id TEXT PRIMARY KEY,
+    service_start_minute INTEGER NOT NULL CHECK (
+        service_start_minute >= 0 AND service_start_minute < 1440
+    ),
+    service_end_minute INTEGER NOT NULL CHECK (
+        service_end_minute > service_start_minute AND service_end_minute < 1440
+    ),
+    frequency_minutes INTEGER NOT NULL CHECK (frequency_minutes > 0),
+    speed_kmh REAL NOT NULL CHECK (speed_kmh > 0),
+    stop_min_spacing_m REAL NOT NULL CHECK (stop_min_spacing_m > 0),
+    data_json TEXT NOT NULL,
+    FOREIGN KEY (city_id) REFERENCES cities(city_id)
+);
+
+CREATE TABLE IF NOT EXISTS bus_stops (
+    city_id TEXT NOT NULL,
+    stop_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    district_name TEXT NOT NULL,
+    street_name TEXT NOT NULL,
+    road_id TEXT NOT NULL,
+    position_x REAL NOT NULL,
+    position_y REAL NOT NULL,
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (city_id, stop_id),
+    FOREIGN KEY (city_id) REFERENCES cities(city_id),
+    FOREIGN KEY (city_id, road_id) REFERENCES roads(city_id, road_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bus_stops_street
+    ON bus_stops(city_id, street_name);
+
+CREATE TABLE IF NOT EXISTS parcels (
+    city_id TEXT NOT NULL,
+    parcel_id TEXT NOT NULL,
+    district_name TEXT NOT NULL,
+    street_name TEXT NOT NULL,
+    cell_q INTEGER NOT NULL,
+    cell_r INTEGER NOT NULL,
+    area_m2 REAL NOT NULL CHECK (area_m2 > 0),
+    organization_id TEXT,
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (city_id, parcel_id),
+    UNIQUE (organization_id),
+    FOREIGN KEY (city_id) REFERENCES cities(city_id),
+    FOREIGN KEY (organization_id) REFERENCES organizations(organization_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_parcels_cell
+    ON parcels(city_id, cell_q, cell_r);
+
+CREATE TABLE IF NOT EXISTS buildings (
+    city_id TEXT NOT NULL,
+    building_id TEXT NOT NULL,
+    parcel_id TEXT NOT NULL,
+    district_name TEXT NOT NULL,
+    street_name TEXT NOT NULL,
+    organization_id TEXT,
+    footprint_area_m2 REAL NOT NULL CHECK (footprint_area_m2 > 0),
+    data_json TEXT NOT NULL,
+    PRIMARY KEY (city_id, building_id),
+    UNIQUE (city_id, parcel_id),
+    UNIQUE (organization_id),
+    FOREIGN KEY (city_id, parcel_id) REFERENCES parcels(city_id, parcel_id),
+    FOREIGN KEY (organization_id) REFERENCES organizations(organization_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_buildings_street
+    ON buildings(city_id, street_name);
+
 CREATE TABLE IF NOT EXISTS characters (
     character_id TEXT PRIMARY KEY,
     city_id TEXT NOT NULL,
@@ -350,24 +438,28 @@ class SQLiteWorldStore:
         target_population: int,
     ) -> "CityWriteSession":
         connection = self._connect()
-        city_ids = CityWriteSession._reserve_block_on_connection(
-            connection,
-            "city",
-            1,
-            owner_city_id=None,
-        )
-        city_id = city_ids[0]
-        connection.execute(
-            """
-            INSERT INTO cities(
-                city_id, city_template, seed, target_population,
-                status, created_at
-            ) VALUES (?, ?, ?, ?, 'generating', ?)
-            """,
-            (city_id, city_template, seed, target_population, _utc_now()),
-        )
-        connection.commit()
-        return CityWriteSession(self, connection, city_id)
+        try:
+            city_ids = CityWriteSession._reserve_block_on_connection(
+                connection,
+                "city",
+                1,
+                owner_city_id=None,
+            )
+            city_id = city_ids[0]
+            connection.execute(
+                """
+                INSERT INTO cities(
+                    city_id, city_template, seed, target_population,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, 'generating', ?)
+                """,
+                (city_id, city_template, seed, target_population, _utc_now()),
+            )
+            connection.commit()
+            return CityWriteSession(self, connection, city_id)
+        except BaseException:
+            connection.close()
+            raise
 
 
 class CityWriteSession:
@@ -682,12 +774,182 @@ class CityWriteSession:
         self._characters.clear()
         self._assignments.clear()
 
-    def complete(
+    def write_urban_layout(
+        self,
+        layout: object,
+        organizations: list[dict[str, object]],
+    ) -> None:
+        """Persist generated roads, parcels, buildings, and Organization sites."""
+
+        self._ensure_open()
+        self.flush()
+        roads = getattr(layout, "roads")
+        parcels = getattr(layout, "parcels")
+        buildings = getattr(layout, "buildings")
+        spatial_fields = (
+            "parcel_id",
+            "building_id",
+            "position",
+            "parcel_area_m2",
+            "building_footprint",
+            "building_area_m2",
+        )
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.executemany(
+                """
+                INSERT INTO roads(
+                    city_id, road_id, district_name, street_name,
+                    level, width_m, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        self.city_id,
+                        road["road_id"],
+                        road["district"],
+                        road["street"],
+                        road["level"],
+                        road["width_m"],
+                        _json(road),
+                    )
+                    for road in roads
+                ),
+            )
+            self.connection.executemany(
+                """
+                INSERT INTO parcels(
+                    city_id, parcel_id, district_name, street_name,
+                    cell_q, cell_r, area_m2, organization_id, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        self.city_id,
+                        parcel["parcel_id"],
+                        parcel["district"],
+                        parcel["street"],
+                        parcel["cell"][0],
+                        parcel["cell"][1],
+                        parcel["area_m2"],
+                        parcel["organization_id"],
+                        _json(parcel),
+                    )
+                    for parcel in parcels
+                ),
+            )
+            self.connection.executemany(
+                """
+                INSERT INTO buildings(
+                    city_id, building_id, parcel_id, district_name,
+                    street_name, organization_id, footprint_area_m2,
+                    data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        self.city_id,
+                        building["building_id"],
+                        building["parcel_id"],
+                        building["district"],
+                        building["street"],
+                        building["organization_id"],
+                        building["footprint_area_m2"],
+                        _json(building),
+                    )
+                    for building in buildings
+                ),
+            )
+            for organization in organizations:
+                organization_id = str(organization["organization_id"])
+                row = self.connection.execute(
+                    "SELECT data_json FROM organizations WHERE organization_id = ?",
+                    (organization_id,),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError(
+                        f"无法为不存在的 Organization“{organization_id}”写入建筑"
+                    )
+                payload = json.loads(row[0])
+                payload.update({
+                    field: organization[field]
+                    for field in spatial_fields
+                    if field in organization
+                })
+                self.connection.execute(
+                    "UPDATE organizations SET data_json = ? WHERE organization_id = ?",
+                    (_json(payload), organization_id),
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def write_bus_system(self, bus_system: object) -> None:
+        """Persist fixed stops and the route-free system-wide timetable."""
+
+        self._ensure_open()
+        stops = getattr(bus_system, "stops")
+        report = getattr(bus_system, "report")
+        start_minute = int(getattr(bus_system, "service_start_minute"))
+        end_minute = int(getattr(bus_system, "service_end_minute"))
+        frequency_minutes = int(getattr(bus_system, "frequency_minutes"))
+        speed_kmh = float(getattr(bus_system, "speed_kmh"))
+        stop_min_spacing_m = float(getattr(bus_system, "stop_min_spacing_m"))
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO bus_systems(
+                    city_id, service_start_minute, service_end_minute,
+                    frequency_minutes, speed_kmh, stop_min_spacing_m, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self.city_id,
+                    start_minute,
+                    end_minute,
+                    frequency_minutes,
+                    speed_kmh,
+                    stop_min_spacing_m,
+                    _json({"report": report}),
+                ),
+            )
+            self.connection.executemany(
+                """
+                INSERT INTO bus_stops(
+                    city_id, stop_id, name, district_name, street_name,
+                    road_id, position_x, position_y, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        self.city_id,
+                        stop["stop_id"],
+                        stop["name"],
+                        stop["district"],
+                        stop["street"],
+                        stop["road_id"],
+                        stop["position"][0],
+                        stop["position"][1],
+                        _json(stop),
+                    )
+                    for stop in stops
+                ),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def prepare_completion(
         self,
         population_usage: dict[str, object],
         *,
         additional_data: dict[str, object] | None = None,
     ) -> None:
+        """Flush generated data while leaving the city open for post-processing."""
+
         self._ensure_open()
         self.flush()
         rows = [(
@@ -739,17 +1001,39 @@ class CityWriteSession:
             self.connection.execute(
                 """
                 UPDATE cities
-                SET status = 'complete', completed_at = ?, data_json = ?
+                SET data_json = ?
                 WHERE city_id = ?
                 """,
-                (
-                    _utc_now(),
-                    _json(city_data),
-                    self.city_id,
-                ),
+                (_json(city_data), self.city_id),
+            )
+
+    def mark_complete(self) -> None:
+        """Publish a fully generated and post-processed city."""
+
+        self._ensure_open()
+        with self.connection:
+            self.connection.execute(
+                """
+                UPDATE cities
+                SET status = 'complete', completed_at = ?, error = NULL
+                WHERE city_id = ?
+                """,
+                (_utc_now(), self.city_id),
             )
         self._closed = True
         self.connection.close()
+
+    def complete(
+        self,
+        population_usage: dict[str, object],
+        *,
+        additional_data: dict[str, object] | None = None,
+    ) -> None:
+        self.prepare_completion(
+            population_usage,
+            additional_data=additional_data,
+        )
+        self.mark_complete()
 
     def fail(self, error: BaseException) -> None:
         if self._closed:

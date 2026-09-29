@@ -28,7 +28,6 @@ from customer_characters import (  # noqa: E402
     create_and_save_customer_character,
     delete_character_world,
     delete_customer_character,
-    draw_city_character,
     excluded_source_ids_for_world,
     load_customer_characters,
     update_character_world_time,
@@ -41,9 +40,8 @@ from daily_work_wallet import (  # noqa: E402
 )
 from world_generation import config as world_config  # noqa: E402
 from world_generation.services.character_catalog import (  # noqa: E402
-    REFERENCE_CITY_DATABASE,
     discover_character_worlds,
-    draw_reference_character,
+    draw_world_character,
 )
 from world_generation.services.character_description import (  # noqa: E402
     _build_card_body_copy,
@@ -166,7 +164,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             database = Path(folder) / "city.sqlite3"
             _build_fixture_database(database)
-            candidate = draw_reference_character(
+            candidate = draw_world_character(
                 "妓女", database=database, rng=random.Random(1)
             )
 
@@ -426,7 +424,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
     def test_character_sidebar_contains_expandable_wallet_and_locked_items(self) -> None:
         page_source = (PROJECT_ROOT / "daily_work_wallet.py").read_text(encoding="utf-8")
 
-        self.assertIn('st.expander("👛 钱包"', page_source)
+        self.assertIn('st.expander("钱包"', page_source)
         self.assertIn('st.metric("净资产"', page_source)
         self.assertIn('st.metric("现金"', page_source)
         self.assertIn('st.toggle(\n                "高利贷"', page_source)
@@ -438,14 +436,35 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
 
     def test_character_sidebar_opens_an_automatically_scaled_city_map(self) -> None:
         page_source = (PROJECT_ROOT / "daily_work_wallet.py").read_text(encoding="utf-8")
+        component_source = (
+            PROJECT_ROOT / "world_generation" / "static" / "city_map" / "index.html"
+        ).read_text(encoding="utf-8")
 
-        self.assertIn('"🗺️ 地图"', page_source)
+        self.assertIn('icon=":material/map:"', page_source)
         self.assertIn("load_city_map_snapshot", page_source)
+        self.assertIn("load_city_map_cell_roads", page_source)
+        self.assertIn("declare_component", page_source)
         self.assertIn('@st.dialog("城市地图", width="large")', page_source)
-        self.assertIn("zoom<1.8?'city':zoom<4?'district':'street'", page_source)
-        self.assertIn("city-landmark", page_source)
-        self.assertIn("player-marker", page_source)
-        self.assertIn("crimeMarker", page_source)
+        self.assertIn("zoom<1.8?'city':zoom<4?'district':zoom<cellZoom?'street':'cell'", component_source)
+        self.assertIn("city-landmark", component_source)
+        self.assertIn("player-marker", component_source)
+        self.assertIn("crimeMarker", component_source)
+        self.assertIn('"roads": _map_roads_data', page_source)
+        self.assertIn('"busStops": [', page_source)
+        self.assertIn("road-district", component_source)
+        self.assertIn("road-cell", component_source)
+        self.assertIn("district-label", component_source)
+        self.assertIn("street-label", component_source)
+        self.assertIn("bus-stop", component_source)
+        self.assertIn("locate-player", component_source)
+        self.assertIn(".slice(0,5)", component_source)
+        self.assertIn("regionOutline(district.cells)", component_source)
+        self.assertNotIn("class:'cell'", component_source)
+        self.assertNotIn("speed_kmh", component_source)
+        self.assertNotIn("km/h", component_source)
+        self.assertIn("确定要前往此处么？", component_source)
+        self.assertIn("reply.mode==='bus'?'车票 ", component_source)
+
 
     def test_character_creation_dialog_cannot_be_dismissed_while_generating(self) -> None:
         source = (PROJECT_ROOT / "daily_work_wallet.py").read_text(encoding="utf-8")
@@ -456,6 +475,10 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
         )
         self.assertIn('if step == "generating":', source)
         self.assertIn("照片生成期间窗口已锁定", source)
+        self.assertIn("_render_portrait_generation_client_timer()", source)
+        self.assertIn('id="portrait-generation-elapsed"', source)
+        self.assertIn("window.setInterval(renderElapsed, 1000)", source)
+        self.assertIn("此计时由浏览器独立运行", source)
         self.assertIn(
             'st.session_state.daily_character_create_step = "generating"',
             source,
@@ -465,12 +488,12 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
     def test_saved_character_card_is_large_and_does_not_clip_summary(self) -> None:
         source = (PROJECT_ROOT / "static/theme.css").read_text(encoding="utf-8")
 
-        self.assertIn("grid-template-columns:minmax(280px,38%)", source)
-        self.assertIn("min-height:520px", source)
+        self.assertIn("grid-template-columns:minmax(220px,37%)", source)
+        self.assertIn(".character-card{grid-template-columns:1fr", source)
         self.assertIn("aspect-ratio:2/3", source)
         self.assertIn("max-height:560px", source)
-        self.assertIn("overflow:visible", source)
-        self.assertIn("max-width:none", source)
+        self.assertNotIn("-webkit-line-clamp", source)
+        self.assertIn(".character-card-copy{min-width:0", source)
         self.assertIn("white-space:normal", source)
 
     def test_creation_preview_heading_shows_name_organization_and_title(self) -> None:
@@ -494,7 +517,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
             database = Path(folder) / "city.sqlite3"
             _build_fixture_database(database)
             with self.assertRaisesRegex(LookupError, "没有找到"):
-                draw_reference_character(
+                draw_world_character(
                     "妓女",
                     database=database,
                     excluded_source_ids={"CUS-00000042"},
@@ -538,7 +561,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             database = Path(folder) / "city.sqlite3"
             _build_fixture_database(database)
-            candidate = draw_reference_character("妓女", database=database)
+            candidate = draw_world_character("妓女", database=database)
 
         prompt = build_character_portrait_prompt(candidate)
         descriptions = build_portrait_descriptions(candidate)
@@ -692,7 +715,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
             root = Path(folder)
             database = root / "city.sqlite3"
             _build_fixture_database(database)
-            candidate = draw_reference_character("妓女", database=database)
+            candidate = draw_world_character("妓女", database=database)
             encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nmock").decode("ascii")
             client = SimpleNamespace(
                 images=SimpleNamespace(
@@ -701,13 +724,15 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                     )
                 )
             )
-            state_file = root / "customer_id_state.json"
+            portraits = root / "portraits"
+            portraits.mkdir()
+            preserved_asset = portraits / "CUS-00000042.png"
+            preserved_asset.write_bytes(b"preserved portrait asset")
             with patch("customer_characters.OpenAI", return_value=client):
                 confirmed = confirm_city_character(
                     candidate,
                     api_key="test-key",
-                    state_file=state_file,
-                    portraits_dir=root / "portraits",
+                    portraits_dir=portraits,
                     storage_root=root,
                 )
 
@@ -720,7 +745,8 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                 confirmed["source_organization_id"],
                 confirmed["organization_id"],
             )
-            self.assertFalse(state_file.exists())
+            self.assertEqual(preserved_asset.read_bytes(), b"preserved portrait asset")
+            self.assertNotEqual(root / confirmed["photo_path"], preserved_asset)
             self.assertTrue((root / confirmed["photo_path"]).is_file())
 
     def test_portrait_generation_reports_attempt_failure_retry_and_completion(self) -> None:
@@ -774,12 +800,20 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                         "name": "待删除",
                         "summary": "简介",
                         "photo_path": "portraits/CUS-1.png",
+                        "source_world_id": "world.sqlite3",
+                        "source_character_id": "CUS-1",
+                        "source_organization_id": "ORG-1",
+                        "player_organization": "ORG-1",
                     },
                     {
                         "id": "CUS-2",
                         "name": "保留",
                         "summary": "简介",
                         "photo_path": "portraits/CUS-2.png",
+                        "source_world_id": "world.sqlite3",
+                        "source_character_id": "CUS-2",
+                        "source_organization_id": "ORG-2",
+                        "player_organization": "ORG-2",
                     },
                 ], ensure_ascii=False),
                 encoding="utf-8",
@@ -813,6 +847,9 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                     "summary": "简介",
                     "photo_path": "portraits/CUS-1.png",
                     "source_world_id": database.name,
+                    "source_character_id": "CUS-1",
+                    "source_organization_id": "ORG-00000007",
+                    "player_organization": "ORG-00000007",
                 }], ensure_ascii=False),
                 encoding="utf-8",
             )
@@ -841,7 +878,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
             root = Path(folder)
             database = root / "city.sqlite3"
             _build_fixture_database(database)
-            candidate = draw_reference_character("妓女", database=database)
+            candidate = draw_world_character("妓女", database=database)
             encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nmock").decode("ascii")
             client = SimpleNamespace(
                 images=SimpleNamespace(
@@ -861,6 +898,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                     "customer_characters.materialize_character_debt",
                     return_value=(),
                 ) as materialize_debt,
+                patch("customer_characters.initialize_character_location") as initialize_location,
             ):
                 created = create_and_save_customer_character(
                     candidate,
@@ -884,13 +922,14 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
             self.assertEqual(openai.call_count, 1)
             update_world.assert_called_once_with(created)
             materialize_debt.assert_called_once_with(created)
+            initialize_location.assert_called_once_with(created)
 
     def test_character_creation_can_defer_world_update_until_game_screen(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             database = root / "city.sqlite3"
             _build_fixture_database(database)
-            candidate = draw_reference_character("妓女", database=database)
+            candidate = draw_world_character("妓女", database=database)
             encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nmock").decode("ascii")
             client = SimpleNamespace(
                 images=SimpleNamespace(
@@ -906,6 +945,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                     "customer_characters.materialize_character_debt",
                     return_value=(),
                 ) as materialize_debt,
+                patch("customer_characters.initialize_character_location") as initialize_location,
             ):
                 created = create_and_save_customer_character(
                     candidate,
@@ -954,6 +994,10 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                         "name": "测试角色",
                         "summary": "测试简介",
                         "photo_path": "portraits/test.png",
+                        "source_world_id": "world.sqlite3",
+                        "source_character_id": "CUS-00000042",
+                        "source_organization_id": "ORG-OLD",
+                        "player_organization": "ORG-OLD",
                         "organization_id": "ORG-OLD",
                         "organization_name": "旧组织",
                         "title": "旧职位",
@@ -1000,6 +1044,7 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
                         "photo_path": "portraits/test.png",
                         "organization_id": "ORG-00000007",
                         "organization_name": "测试会馆",
+                        "source_organization_id": "ORG-00000007",
                         "player_organization": "ORG-00000007",
                         "profile": {"所属组织": "测试会馆"},
                     }],
@@ -1069,48 +1114,6 @@ class CharacterCatalogIntegrationTests(unittest.TestCase):
             self.assertEqual(visits[2][1], "ORG-OTHER")
             self.assertEqual(visits[3][1], "ORG-00000007")
 
-    @unittest.skipUnless(REFERENCE_CITY_DATABASE.is_file(), "reference database absent")
-    def test_real_reference_database_smoke(self) -> None:
-        with closing(sqlite3.connect(REFERENCE_CITY_DATABASE)) as connection:
-            indexes = {
-                row[1] for row in connection.execute("PRAGMA index_list(characters)")
-            }
-            invalid = connection.execute(
-                """
-                SELECT COUNT(*) FROM characters
-                WHERE occupation IN (?, ?, ?, ?, ?, ?)
-                  AND (
-                    json_extract(data_json, '$.sex') <> 'female'
-                    OR CAST(json_extract(data_json, '$.age') AS INTEGER) < 18
-                  )
-                """,
-                ("站街女", "妓女", "冰妹", "性奴", "SM妓女", "发廊妹"),
-            ).fetchone()[0]
-            old_sm_skills = connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM characters, json_each(data_json, '$.skills') AS skill
-                WHERE skill.key IN ('束缚安全', '捆绑技巧', '主导调教技巧')
-                """
-            ).fetchone()[0]
-            new_sm_skills = connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM characters, json_each(data_json, '$.skills') AS skill
-                WHERE skill.key IN ('狗奴技巧', '刑奴技巧', '厕奴技巧')
-                """
-            ).fetchone()[0]
-        self.assertIn("idx_characters_occupation", indexes)
-        self.assertEqual(invalid, 0)
-        self.assertEqual(old_sm_skills, 0)
-        self.assertGreater(new_sm_skills, 0)
-        candidate = draw_city_character("随机")
-        self.assertIn(candidate["occupation"], {
-            "站街女", "妓女", "冰妹", "性奴", "SM妓女", "发廊妹",
-        })
-        self.assertTrue(candidate["source_character_id"].startswith("CUS-"))
-
-
 class StreamlitFrontendSmokeTests(unittest.TestCase):
     def test_character_selection_page_and_dialog_render(self) -> None:
         from streamlit.testing.v1 import AppTest
@@ -1123,8 +1126,23 @@ class StreamlitFrontendSmokeTests(unittest.TestCase):
         next(button for button in app.button if button.label == "✦ 创建新角色").click()
         app.run()
         self.assertFalse(app.exception)
-        self.assertTrue(any(button.label == "抽选角色" for button in app.button))
-        self.assertTrue(any(selectbox.label == "世界" for selectbox in app.selectbox))
+        world_missing = any(
+            "没有可用的世界数据库" in error.value for error in app.error
+        )
+        if world_missing:
+            self.assertFalse(
+                any(button.label == "抽选角色" for button in app.button)
+            )
+            self.assertFalse(
+                any(selectbox.label == "世界" for selectbox in app.selectbox)
+            )
+        else:
+            self.assertTrue(
+                any(button.label == "抽选角色" for button in app.button)
+            )
+            self.assertTrue(
+                any(selectbox.label == "世界" for selectbox in app.selectbox)
+            )
 
 
 if __name__ == "__main__":

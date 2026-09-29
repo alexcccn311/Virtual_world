@@ -17,9 +17,6 @@ from .character_description import (
 
 
 WORLD_DATABASE_DIRECTORY = Path(__file__).resolve().parents[1] / "data"
-# Kept only as a compatibility alias for callers and tests that explicitly
-# inspect the historical sample.  Frontend discovery does not use this path.
-REFERENCE_CITY_DATABASE = WORLD_DATABASE_DIRECTORY / "reference_city.sqlite3"
 DAILY_CHARACTER_OCCUPATIONS = (
     "站街女",
     "妓女",
@@ -289,7 +286,7 @@ def _normalise_character(row: sqlite3.Row) -> dict[str, Any]:
     return character
 
 
-def draw_reference_character(
+def draw_world_character(
     occupation: str,
     *,
     excluded_source_ids: set[str] | None = None,
@@ -364,7 +361,6 @@ def draw_reference_character(
         {
             "source_world_id": world_id,
             "source_world_name": database.stem,
-            "source_database": database.name,
             "source_key": f"{world_id}:{source_character_id}",
         }
     )

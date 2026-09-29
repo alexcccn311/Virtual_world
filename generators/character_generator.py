@@ -106,7 +106,7 @@ from ..character_config import (
     FACE_SCORE_NORMAL,
     FACE_SCORE_PERFECT,
 )
-from customer_characters import format_customer_id
+from ..storage.global_id_registry import format_character_id
 
 
 # =============================================================================
@@ -641,7 +641,7 @@ def set_next_character_id(next_number: int) -> None:
 def _allocate_character_id() -> str:
     global _next_character_number
     while True:
-        character_id = format_customer_id(_next_character_number)
+        character_id = format_character_id(_next_character_number)
         _next_character_number += 1
         if character_id not in _issued_character_ids:
             _issued_character_ids.add(character_id)
@@ -1388,7 +1388,7 @@ def generate_body_measurements(
         )
         return min(1.0, max(0.0, (age_value - reference_value) / (1.0 - reference_value)))
 
-    def _legacy_male_body_quality(
+    def _male_body_quality(
         sex: str,
         bmi: float,
         waist_height_ratio: float,
@@ -1422,7 +1422,7 @@ def generate_body_measurements(
                 height, bmi, waist_height_ratio, waist_hip_ratio, cup_index,
             ) / 100.0
         else:
-            body_quality = _legacy_male_body_quality(
+            body_quality = _male_body_quality(
                 sex,
                 bmi,
                 waist_height_ratio,

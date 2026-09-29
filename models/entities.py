@@ -1,6 +1,6 @@
 """Core data models shared by orchestration and generators."""
 from __future__ import annotations
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 
 @dataclass(slots=True)
@@ -129,15 +129,6 @@ class Character:
         return result
 
 
-@dataclass(slots=True)
-class CityPopulation:
-    seed: int
-    characters: list[Character]
-    organizations: list[Organization]
-    config_version: str
-    districts: list[District] = field(default_factory=list)
-
-
 @dataclass(slots=True, frozen=True)
 class LoanQuote:
     organization_id: str
@@ -177,11 +168,3 @@ class PlayerLoanContract:
 
     def as_dict(self) -> dict:
         return asdict(self)
-
-# ---- distributions.py ----
-"""Reusable deterministic distribution helpers."""
-
-
-import math
-import random
-from collections.abc import Mapping, Sequence

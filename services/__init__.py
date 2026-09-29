@@ -11,11 +11,20 @@ from .character_description import (
 from .character_catalog import (
     CharacterWorldDatabase,
     DAILY_CHARACTER_OCCUPATIONS,
-    REFERENCE_CITY_DATABASE,
     WORLD_DATABASE_DIRECTORY,
     character_world_by_id,
     discover_character_worlds,
-    draw_reference_character,
+    draw_world_character,
+)
+from .bus_service import (
+    BusOperatingSchedule,
+    BusStop,
+    BusTripEstimate,
+    LoadedBusSystem,
+    RoadNetwork,
+    estimate_bus_trip,
+    load_bus_system,
+    shortest_road_distance_m,
 )
 
 __all__ = (
@@ -25,11 +34,18 @@ __all__ = (
     "build_character_descriptions",
     "build_character_portrait_prompt",
     "build_face_description",
+    "BusOperatingSchedule",
+    "BusStop",
+    "BusTripEstimate",
     "CharacterWorldDatabase",
     "DAILY_CHARACTER_OCCUPATIONS",
-    "REFERENCE_CITY_DATABASE",
     "WORLD_DATABASE_DIRECTORY",
     "character_world_by_id",
     "discover_character_worlds",
-    "draw_reference_character",
+    "draw_world_character",
+    "estimate_bus_trip",
+    "LoadedBusSystem",
+    "load_bus_system",
+    "RoadNetwork",
+    "shortest_road_distance_m",
 )

@@ -194,6 +194,10 @@ class StatisticsReportGeneratorTests(unittest.TestCase):
 
         def fake_generate(*args: object, **kwargs: object) -> dict[str, object]:
             events.append("generate")
+            before_complete = kwargs.get("before_store_complete")
+            self.assertIsNotNone(before_complete)
+            before_complete(generated)  # type: ignore[operator]
+            events.append("complete")
             return generated
 
         def fake_family(*args: object, **kwargs: object) -> FamilyAssignmentReport:
@@ -226,7 +230,10 @@ class StatisticsReportGeneratorTests(unittest.TestCase):
         ):
             result = generate_city_with_relationships(1, store=store)  # type: ignore[arg-type]
 
-        self.assertEqual(events, ["generate", "levels", "family", "statistics"])
+        self.assertEqual(
+            events,
+            ["generate", "levels", "family", "complete", "statistics"],
+        )
         self.assertTrue(str(result["statistics_report"]).endswith(
             "world_statistics.json"
         ))

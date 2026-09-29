@@ -5,7 +5,7 @@ import random
 import math
 import hashlib
 from collections import Counter, defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from string import Formatter
 
 from .. import config
@@ -17,7 +17,9 @@ from .district_generator import (
     generate_district_organizations,
     required_organization_counts,
 )
+from .bus_system_generator import generate_bus_system
 from .organization_generator import OrganizationGenerator
+from .urban_layout_generator import generate_urban_layout
 
 
 # District area and HEX_CELL_AREA are measured in km².
@@ -1434,8 +1436,16 @@ def generate_city(
     special_role: dict | None = None,
     store: SQLiteWorldStore | None = None,
     retain_organization_characters: bool | None = None,
+    before_store_complete: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
-    """Generate the map, city Organizations, then every District."""
+    """Generate the map, city Organizations, then every District.
+
+    ``before_store_complete`` runs after all generated rows are flushed but
+    while the persisted city is still marked ``generating``.  An exception
+    from the callback therefore follows the normal failed-generation path.
+    """
+    if before_store_complete is not None and store is None:
+        raise ValueError("before_store_complete 仅可与 SQLiteWorldStore 一起使用")
     if city_template not in config.CITY_TEMPLATES:
         raise KeyError(f"未知 CITY_TEMPLATE“{city_template}”")
 
@@ -1548,6 +1558,20 @@ def generate_city(
             "lower_bound_met": actual_sex_worker_count >= sex_worker_target,
             "districts": district_sex_worker_reports,
         }
+        urban_layout = generate_urban_layout(
+            streets,
+            organizations,
+            seed=seed,
+        )
+        bus_system = generate_bus_system(
+            urban_layout.roads,
+            seed=seed,
+            streets=streets,
+            organizations=organizations,
+        )
+        if write_session is not None:
+            write_session.write_urban_layout(urban_layout, organizations)
+            write_session.write_bus_system(bus_system)
         organization_population_usage = population_ledger.snapshot()
         result = {
             "city_id": (
@@ -1562,14 +1586,21 @@ def generate_city(
             "organizations": organizations,
             "organization_population_usage": organization_population_usage,
             "sex_worker_population": sex_worker_population,
+            "urban_layout": urban_layout,
+            "bus_system": bus_system,
         }
         if write_session is not None:
-            write_session.complete(
+            write_session.prepare_completion(
                 organization_population_usage,
                 additional_data={
                     "sex_worker_population": sex_worker_population,
+                    "urban_layout": urban_layout.report,
+                    "bus_system": bus_system.report,
                 },
             )
+            if before_store_complete is not None:
+                before_store_complete(result)
+            write_session.mark_complete()
         return result
     except Exception as error:
         if write_session is not None:

@@ -213,6 +213,13 @@ class SexWorkerLevelGeneratorTests(unittest.TestCase):
             finally:
                 connection.close()
 
+            with self.assertRaisesRegex(ValueError, "不存在城市"):
+                assign_sex_worker_levels_in_database(
+                    database,
+                    city_id="CITY-MISSING",
+                    seed=17,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

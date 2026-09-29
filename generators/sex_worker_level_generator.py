@@ -304,6 +304,12 @@ def assign_sex_worker_levels_in_database(
     database = Path(database_path)
     connection = sqlite3.connect(database, timeout=60.0)
     try:
+        city_exists = connection.execute(
+            "SELECT 1 FROM cities WHERE city_id = ?",
+            (city_id,),
+        ).fetchone()
+        if city_exists is None:
+            raise ValueError(f"数据库中不存在城市“{city_id}”")
         rows = connection.execute(
             """
             SELECT

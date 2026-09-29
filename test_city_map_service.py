@@ -7,7 +7,11 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from world_generation.services.city_map_service import load_city_map_snapshot
+from world_generation.services.city_map_service import (
+    load_city_map_buildings,
+    load_city_map_cell_roads,
+    load_city_map_snapshot,
+)
 
 
 class CityMapServiceTests(unittest.TestCase):
@@ -45,6 +49,20 @@ class CityMapServiceTests(unittest.TestCase):
                         district_name TEXT NOT NULL,
                         street_name TEXT NOT NULL,
                         data_json TEXT NOT NULL
+                    );
+                    CREATE TABLE roads(
+                        city_id TEXT NOT NULL,
+                        road_id TEXT NOT NULL,
+                        street_name TEXT NOT NULL,
+                        level TEXT NOT NULL,
+                        data_json TEXT NOT NULL
+                    );
+                    CREATE TABLE bus_stops(
+                        city_id TEXT NOT NULL,
+                        stop_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        position_x REAL NOT NULL,
+                        position_y REAL NOT NULL
                     );
                     """
                 )
@@ -84,6 +102,41 @@ class CityMapServiceTests(unittest.TestCase):
                         json.dumps({"address": [0, 0]}),
                     ),
                 )
+                connection.execute(
+                    "INSERT INTO roads VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "CITY-1",
+                        "ROAD-1",
+                        "中街",
+                        "district_boundary",
+                        json.dumps(
+                            {
+                                "segment_type": "boundary",
+                                "centerline": [[0.0, 0.0], [1.0, 1.0]],
+                            }
+                        ),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO roads VALUES (?, ?, ?, ?, ?)",
+                    (
+                        "CITY-1",
+                        "ROAD-CELL",
+                        "中街",
+                        "local",
+                        json.dumps(
+                            {
+                                "segment_type": "subdivision",
+                                "cell": [0, 0],
+                                "centerline": [[0.1, 0.2], [0.8, 0.9]],
+                            }
+                        ),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO bus_stops VALUES (?, ?, ?, ?, ?)",
+                    ("CITY-1", "STOP-1", "中央区中街站", 0.5, 0.5),
+                )
                 connection.commit()
 
             snapshot = load_city_map_snapshot(database, "CUS-1")
@@ -100,6 +153,48 @@ class CityMapServiceTests(unittest.TestCase):
                 "ORG-SHOP",
                 {landmark.organization_id for landmark in snapshot.landmarks},
             )
+            self.assertEqual(snapshot.roads[0].level, "district_boundary")
+            self.assertEqual(snapshot.roads[0].centerline[1], (1.0, 1.0))
+            self.assertEqual(snapshot.bus_stops[0].name, "中央区中街站")
+            workplace_map = load_city_map_snapshot(database, "CUS-1", "ORG-SHOP")
+            workplace = next(item for item in workplace_map.landmarks if item.organization_id == "ORG-SHOP")
+            self.assertEqual(workplace.min_level, "city")
+            self.assertEqual(workplace.kind, "workplace")
+            self.assertEqual(workplace.name, "便利店")
+            self.assertEqual(len(workplace_map.landmarks), len(snapshot.landmarks) + 1)
+            self.assertNotIn("ORG-SHOP", {item.organization_id for item in load_city_map_snapshot(database, "CUS-1", "ORG-CASINO").landmarks})
+            # A venue gets a distinct workplace marker only for its employee.
+            with closing(sqlite3.connect(database)) as connection, connection:
+                connection.execute("INSERT INTO organizations VALUES (?, 'CITY-1', ?, ?, ?)",
+                                   ("ORG-VENUE", "ordinary_brothel", "测试会馆", json.dumps({"address": [0, 0]})))
+            for employer, expected, level in (("ORG-VENUE", "workplace", "city"), ("ORG-CASINO", "sex_service", "cell")):
+                view = load_city_map_snapshot(database, "CUS-1", employer)
+                venue = next(item for item in view.landmarks if item.organization_id == "ORG-VENUE")
+                self.assertEqual((venue.kind, venue.min_level), (expected, level))
+                self.assertEqual(sum(item.kind == "workplace" for item in view.landmarks), 1)
+            cell_roads = load_city_map_cell_roads(database, "CITY-1", ((0, 0),))
+            self.assertEqual(len(cell_roads), 1)
+            self.assertEqual(cell_roads[0].kind, "subdivision")
+            self.assertEqual(load_city_map_buildings(database, "CITY-1", ((0, 0),)), [])
+            with closing(sqlite3.connect(database)) as connection:
+                connection.executescript(
+                    """CREATE TABLE parcels(city_id TEXT, parcel_id TEXT, cell_q INTEGER, cell_r INTEGER);
+                       CREATE TABLE buildings(city_id TEXT, parcel_id TEXT, data_json TEXT);"""
+                )
+                for index in range(2):
+                    connection.execute("INSERT INTO parcels VALUES (?, ?, ?, 0)", ("CITY-1", str(index), index))
+                    connection.execute("INSERT INTO buildings VALUES (?, ?, ?)", (
+                        "CITY-1", str(index), json.dumps({"footprint": [[index, 0], [index+1, 0], [index, 1]]}),
+                    ))
+                connection.commit()
+            footprints = load_city_map_buildings(database, "CITY-1", ((0, 0),))
+            self.assertEqual(footprints, [[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]])
+            with self.assertRaisesRegex(ValueError, "最多读取 5 个 cell"):
+                load_city_map_cell_roads(
+                    database,
+                    "CITY-1",
+                    tuple((index, 0) for index in range(6)),
+                )
 
 
 if __name__ == "__main__":

@@ -84,38 +84,19 @@ def generate_city_with_relationships(
     iterable and map without importing city-specific orchestration.
     """
 
-    result = generate_city(
-        target_city_population,
-        seed,
-        city_template=city_template,
-        special_role=special_role,
-        store=store,
-        retain_organization_characters=retain_organization_characters,
-    )
-    world_map = _world_map_from_generation(result)
-    retained = _retained_characters(result)
-    if store is None:
-        sex_worker_report = assign_sex_worker_levels(
-            retained,
-            _organization_types(result),
-            seed=seed,
-        )
-        report = assign_family_relationships(
-            retained,
-            world_map,
-            seed=seed,
-        )
-    else:
+    def postprocess_persisted_city(result: dict[str, object]) -> None:
+        world_map = _world_map_from_generation(result)
+        retained = _retained_characters(result)
         city_id = result.get("city_id")
         if not isinstance(city_id, str) or not city_id:
             raise RuntimeError("SQLite 城市生成完成后未返回有效 city_id")
         sex_worker_report = assign_sex_worker_levels_in_database(
-            store.database_path,
+            store.database_path,  # type: ignore[union-attr]
             city_id=city_id,
             seed=seed,
         )
-        report = assign_family_relationships_in_database(
-            store.database_path,
+        family_report = assign_family_relationships_in_database(
+            store.database_path,  # type: ignore[union-attr]
             world_map,
             city_id=city_id,
             seed=seed,
@@ -131,9 +112,35 @@ def generate_city_with_relationships(
             if retained_level_report.as_dict() != sex_worker_report.as_dict():
                 raise RuntimeError("内存与数据库性工作者等级分配结果不一致")
             assign_family_relationships(retained, world_map, seed=seed)
+        result["sex_worker_levels"] = sex_worker_report.as_dict()
+        result["family_relationships"] = family_report.as_dict()
 
-    result["sex_worker_levels"] = sex_worker_report.as_dict()
-    result["family_relationships"] = report.as_dict()
+    result = generate_city(
+        target_city_population,
+        seed,
+        city_template=city_template,
+        special_role=special_role,
+        store=store,
+        retain_organization_characters=retain_organization_characters,
+        before_store_complete=(
+            postprocess_persisted_city if store is not None else None
+        ),
+    )
+    if store is None:
+        world_map = _world_map_from_generation(result)
+        retained = _retained_characters(result)
+        sex_worker_report = assign_sex_worker_levels(
+            retained,
+            _organization_types(result),
+            seed=seed,
+        )
+        report = assign_family_relationships(
+            retained,
+            world_map,
+            seed=seed,
+        )
+        result["sex_worker_levels"] = sex_worker_report.as_dict()
+        result["family_relationships"] = report.as_dict()
     if store is not None:
         output_path = write_world_statistics_report(
             store.database_path,

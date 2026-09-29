@@ -41,7 +41,11 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _format_character_id(number: int) -> str:
+def format_character_id(number: int) -> str:
+    """Format a positive global character sequence as its permanent ID."""
+
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise ValueError("角色序号必须是大于 0 的整数")
     return f"{CHARACTER_ID_PREFIX}-{number:0{CHARACTER_ID_WIDTH}d}"
 
 
@@ -195,7 +199,7 @@ class GlobalCharacterIdRegistry:
             )
             connection.commit()
             return [
-                _format_character_id(number)
+                format_character_id(number)
                 for number in range(start, next_value)
             ]
         except Exception:
@@ -258,4 +262,8 @@ class GlobalCharacterIdRegistry:
             )
 
 
-__all__ = ["GLOBAL_ID_REGISTRY_FILENAME", "GlobalCharacterIdRegistry"]
+__all__ = [
+    "GLOBAL_ID_REGISTRY_FILENAME",
+    "GlobalCharacterIdRegistry",
+    "format_character_id",
+]
